@@ -6,31 +6,31 @@ import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import logging
-import nest_asyncio
-from decouple import config
+#import nest_asyncio
+from dotenv import load_dotenv, find_dotenv
 import os
 from tardis_dev import datasets
-nest_asyncio.apply()
+#nest_asyncio.apply()
 logging.basicConfig(level=logging.DEBUG)
 import pytz
 import glob
 from helpers import symbol_ls
+import concurrent.futures
 
-my_api_key = config('API_KEY')
+
+load_dotenv(find_dotenv())
+
+my_api_key = os.environ.get('API_KEY')
 exchanges = ['deribit']
 side_action_dd = {'buy': 'ask', 'sell': 'bid'}
 data_types = ['book_snapshot_5']
 
 def file_name_nested(exchange, data_type, date, symbol, format):
-    # if exchange == 'deribit':
-    #     symbol = symbol.replace('_', '')
-    # elif exchange in ['coinbase', 'kraken']:
-    #     symbol = symbol.replace('-', '')
-    symbol = symbol.replace('XBT', 'BTC')
     directory = f'./{exchange}/{str(date.year)}/{data_type}'
     if not os.path.exists(directory):
         os.mkdir(directory)
-    return (f"{exchange}/{str(date.year)}/{data_type}/{date.strftime('%Y-%m-%d')}_{symbol.replace('-', '')}.{format}.gz")
+    return (f"{exchange}/{str(date.year)}/{data_type}/"
+            f"{date.strftime('%Y-%m-%d')}_{symbol.replace('-', '')}.{format}.gz")
 
 
 def parser_data(df: pd.DataFrame) -> None:
@@ -94,6 +94,8 @@ def parser_raw_book_trades(df: pd.DataFrame) -> pd.DataFrame:
 def download_data(start: datetime, exchange: str = 'binance') -> None:
     from_date_string = start.strftime('%Y-%m-%d')
     to_date_string = (start+relativedelta(days=1)).strftime('%Y-%m-%d')
+    if not os.path.exists(f'./binance/{from_date_string[:4]}'):
+        os.mkdir(f'./binance/{from_date_string[:4]}')
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(datasets.download, exchange=exchange, data_types=data_types,
                                    symbols=[symbol], from_date=from_date_string, to_date=to_date_string,
