@@ -1,19 +1,15 @@
 import concurrent.futures
-import pdb
-import typing
+import argparse
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import logging
-#import nest_asyncio
 from dotenv import load_dotenv, find_dotenv
 import os
 from tardis_dev import datasets
-#nest_asyncio.apply()
 logging.basicConfig(level=logging.DEBUG)
 import pytz
-import glob
 from helpers import symbol_ls
 import concurrent.futures
 
@@ -54,7 +50,7 @@ def parser_raw_book_snapshot(df: pd.DataFrame) -> pd.DataFrame:
     original_columns_to_be_deleted = ['asks[0].price', 'asks[0].amount', 'bids[0].price', 'bids[0].amount']
     df = df[['exchange', 'symbol', 'timestamp']+original_columns_to_be_deleted]
     df = df.set_index('timestamp')
-    df.index = [datetime.fromtimestamp(int(idx)/ 1_000_000, tz=pytz.timezone('Etc/UTC')) for idx in df.index]
+    df.index = [datetime.fromtimestamp(int(idx) // 1_000_000, tz=pytz.timezone('Etc/UTC')) for idx in df.index]
     df = df.resample('T').last()
     df = df.assign(bidPx=df['bids[0].price'], bidQty=df['bids[0].amount'],
                    askPx=df['asks[0].price'], askQty=df['asks[0].amount'])
@@ -91,72 +87,37 @@ def parser_raw_book_trades(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def download_data(start: datetime, exchange: str = 'binance') -> None:
-    from_date_string = start.strftime('%Y-%m-%d')
-    to_date_string = (start+relativedelta(days=1)).strftime('%Y-%m-%d')
-    if not os.path.exists(f'./binance/{from_date_string[:4]}'):
-        os.mkdir(f'./binance/{from_date_string[:4]}')
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(datasets.download, exchange=exchange, data_types=data_types,
-                                   symbols=[symbol], from_date=from_date_string, to_date=to_date_string,
-                                   format='csv', api_key=my_api_key, download_dir=f'./', get_filename=file_name_nested)
-                   for symbol in symbol_ls]
-        done, not_done = concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
-        for future in concurrent.futures.as_completed(done):
-            book_snapshot_dd = \
-                {symbol: parser_raw_book_snapshot(
-                    pd.read_csv(f'./binance/{str(start.year)}/book_snapshot_5/{from_date_string}_{symbol}.csv.gz',
-                                compression='gzip'))
-                 for symbol in symbol_ls}
-            # trades_dd = \
-            #     {symbol: parser_raw_book_trades(
-            #         pd.read_csv(f'./binance/{str(start.year)}/trades/{from_date_string}_{symbol}.csv.gz',
-            #                     compression='gzip')) for symbol in symbol_ls}
-            print(f'[DATA PARSING]: Individual data parsing for {from_date_string} is completed.')
-            book_snapshot = pd.concat(book_snapshot_dd).droplevel(0, 0)
-            df = book_snapshot
-            #trades = pd.concat(trades_dd).droplevel(0, 0)
-            #df = pd.concat([book_snapshot, trades], axis=1)
-            df = df.loc[:, ~df.columns.duplicated()]
-            df.to_csv(f'./binance/{str(start.year)}/{from_date_string}.csv.gz', compression='gzip')
-            print(f'[FILE GENERATION]: Aggregated file for {from_date_string} has been generated.')
-            book_snapshot_dd = \
-                {symbol: os.remove(f'./binance/{start.year}/book_snapshot_5/{from_date_string}_{symbol}.csv.gz')
-                 for symbol in symbol_ls}
-            # trades_dd = \
-            #     {symbol: os.remove(f'./binance/{start.year}/trades/{from_date_string}_{symbol}.csv.gz')
-            #      for symbol in symbol_ls}
-
-
-def add_file(file: str, feature: str = 'Px') -> None:
-    bid = pd.read_csv(file, compression='gzip', usecols=['Unnamed: 0', 'symbol', f'bid{feature}'])
-    bid = pd.pivot_table(bid, values=f'bid{feature}', columns='symbol', index='Unnamed: 0')
-    ask = pd.read_csv(file, compression='gzip', usecols=['Unnamed: 0', 'symbol', f'ask{feature}'])
-    ask = pd.pivot_table(ask, values=f'ask{feature}', columns='symbol', index='Unnamed: 0')
-    tmp = .5*(bid+ask) if feature == 'Px' else (bid+ask)
-    tmp.index.name = 'timestamp'
-    tmp.columns.name = None
-    data[file] = tmp
-
-
-def aggregate_per_year(year: int, feature: str='Px') -> None:
-    files = glob.glob(f'./binance/{str(year)}/*.csv.gz')
-    global data
-    data = dict()
-    for file in files:
-        add_file(file, feature)
-    data = pd.concat(data).droplevel(axis=0, level=0)
-    data.to_parquet(f'./binance/aggregate{str(year)}') if feature == 'Px' else \
-        data.to_parquet(f'./binance/aggregate{str(year)}_volume')
+def download_data(start: str, end: str, exchange: str = 'binance') -> None:
+    date_range = pd.date_range(start=start, end=end, inclusive='both', freq='1D')
+    for date in date_range:
+        price_dd = dict()
+        volume_dd = dict()
+        from_date_string = date.strftime('%Y-%m-%d')
+        to_date_string = (date+relativedelta(days=1)).strftime('%Y-%m-%d')
+        datasets.download(exchange=exchange, data_types=data_types,
+                          symbols=symbol_ls, from_date=from_date_string, to_date=to_date_string,
+                          format='csv', api_key=my_api_key, download_dir=f'./')
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(lambda x: x, x=symbol) for symbol in symbol_ls]
+            for future in concurrent.futures.as_completed(futures):
+                symbol = future.result()
+                file = pd.read_csv(f'./binance_book_snapshot_5_{from_date_string}_{symbol}.csv.gz')
+                price_dd[symbol] = parser_raw_book_snapshot(file).filter(regex='Px').mean(axis=1)
+                volume_dd[symbol] = parser_raw_book_snapshot(file).filter(regex='Qty').mean(axis=1)
+                os.remove(f'./binance_book_snapshot_5_{from_date_string}_{symbol}.csv.gz')
+        price = pd.concat(price_dd, axis=1)
+        price.index.name = 'timestamp'
+        volume = pd.concat(volume_dd, axis=1)
+        volume.index.name = 'timestamp'
+        price.to_csv(f'./aggregate{date.year}', mode='a', header=not os.path.exists(f'./aggregate{date.year}'))
+        volume.to_csv(f'./aggregate{date.year}_volume', mode='a',
+                      header=not os.path.exists(f'./aggregate{date.year}_volume'))
+        print(f'[FILE GENERATION]: Aggregated file for {from_date_string} has been generated.')
 
 
 if __name__ == '__main__':
 
-    dates = list(pd.date_range(start=datetime(2021, 1, 1, tzinfo=pytz.utc),
-                               end=datetime(2023, 7, 1, tzinfo=pytz.utc),
-                               freq='1D', inclusive='left'))
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(download_data, date) for _, date in enumerate(dates)]
-    for year in list(range(2021, 2024)):
-        aggregate_per_year(year)
-        aggregate_per_year(year, 'Qty')
+    for year in list(range(2024, 2026)):
+        start_date = f'{year}-01-01'
+        end_date = f'{year}-12-31' if year < 2025 else f'{year}-03-31'
+        download_data(start=start_date, end=end_date, exchange='binance')
